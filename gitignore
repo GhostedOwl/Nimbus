@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock (keep for binaries, remove this line for libraries)
+# Cargo.lock  ← для бинаря оставляем, не игнорируем
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local env / secrets (на случай если добавишь .env)
+.env
+.env.*
