@@ -132,11 +132,16 @@ impl NimbusApp {
     }
 
     fn poll_tray(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(tray) = &self.tray else { return };
-        while let Some(ev) = tray.poll_menu() {
-            if ev.id == tray.id_settings { self.open_settings(); }
-            else if ev.id == tray.id_refresh { self.spawn_fetch(); }
-            else if ev.id == tray.id_quit { event_loop.exit(); }
+        let (id_settings, id_refresh, id_quit, menu_events) = {
+            let Some(tray) = &self.tray else { return };
+            let mut events = vec![];
+            while let Some(ev) = tray.poll_menu() { events.push(ev); }
+            (tray.id_settings.clone(), tray.id_refresh.clone(), tray.id_quit.clone(), events)
+        };
+        for ev in menu_events {
+            if ev.id == id_settings { self.open_settings(); }
+            else if ev.id == id_refresh { self.spawn_fetch(); }
+            else if ev.id == id_quit { event_loop.exit(); }
         }
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click { button: MouseButton::Left, .. } = ev {
