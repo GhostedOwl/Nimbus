@@ -13,7 +13,7 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tray::Tray;
-use tray_icon::{TrayIconEvent, MouseButton};
+use tray_icon::{TrayIconEvent, MouseButton, menu::MenuEvent};
 use weather::WeatherData;
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,11 @@ pub enum AppEvent {
     WeatherReady(Box<WeatherData>),
     WeatherError(String),
     ConfigSaved(Config),
+    OpenForecast,
+    OpenSettings,
+    Refresh,
+    Quit,
+    RawMenuEvent(tray_icon::menu::MenuId),
 }
 
 struct NimbusApp {
@@ -29,7 +34,7 @@ struct NimbusApp {
     tray: Option<Tray>,
     rt: tokio::runtime::Handle,
     event_rx: std::sync::mpsc::Receiver<AppEvent>,
-    event_tx: std::sync::mpsc::Sender<AppEvent>,
+    pub event_tx: std::sync::mpsc::Sender<AppEvent>,
     refresh_timer: Instant,
     fetching: bool,
     show_forecast: bool,
@@ -149,38 +154,21 @@ impl eframe::App for NimbusApp {
                     self.fetching = false;
                     self.spawn_fetch(ctx);
                 }
+                AppEvent::OpenForecast => { self.show_forecast = true; }
+                AppEvent::OpenSettings => { self.show_settings = true; }
+                AppEvent::Refresh => { self.spawn_fetch(ctx); }
+                AppEvent::Quit => { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                AppEvent::RawMenuEvent(id) => {
+                    if let Some(tray) = &self.tray {
+                        if id == tray.id_settings { self.show_settings = true; }
+                        else if id == tray.id_refresh { self.spawn_fetch(ctx); }
+                        else if id == tray.id_quit { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                    }
+                }
             }
         }
 
-        {
-            let mut open_forecast = false;
-            let mut open_settings = false;
-            let mut do_refresh = false;
-            let mut do_quit = false;
-
-            if let Some(tray) = &self.tray {
-                let (id_s, id_r, id_q) = (
-                    tray.id_settings.clone(),
-                    tray.id_refresh.clone(),
-                    tray.id_quit.clone(),
-                );
-                while let Some(ev) = tray.poll_menu() {
-                    if ev.id == id_s { open_settings = true; }
-                    else if ev.id == id_r { do_refresh = true; }
-                    else if ev.id == id_q { do_quit = true; }
-                }
-            }
-            while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                if let TrayIconEvent::Click { button: MouseButton::Left, .. } = ev {
-                    open_forecast = true;
-                }
-            }
-
-            if open_forecast { self.show_forecast = true; }
-            if open_settings { self.show_settings = true; }
-            if do_refresh    { self.spawn_fetch(ctx); }
-            if do_quit       { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
-        }
+        // tray/menu events handled via event_tx in main()
 
         let interval = Duration::from_secs(self.config.refresh_interval.minutes() * 60);
         if self.refresh_timer.elapsed() >= interval {
@@ -277,6 +265,24 @@ fn main() -> Result<()> {
     };
 
     let app = NimbusApp::new(config, rt.handle().clone());
+
+    // Wire up tray left-click
+    {
+        let tx = app.event_tx.clone();
+        TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, .. } = ev {
+                let _ = tx.send(AppEvent::OpenForecast);
+            }
+        }));
+    }
+
+    // Wire up menu events
+    {
+        let tx = app.event_tx.clone();
+        MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
+            let _ = tx.send(AppEvent::RawMenuEvent(ev.id));
+        }));
+    }
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
