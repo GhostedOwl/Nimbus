@@ -80,19 +80,23 @@ impl NimbusApp {
         let Some(tray) = &self.tray else { return };
         let w = self.weather.lock().unwrap();
         let c = self.config.lock().unwrap();
-        let tooltip = match w.as_ref() {
-            None => "Nimbus — loading…".to_string(),
-            Some(w) => {
-                let temp = match c.tray_temp {
-                    TrayTemp::FeelsLike => w.current.feels_like,
-                    TrayTemp::Actual => w.current.temperature,
-                };
-                let sign = if temp >= 0.0 { "+" } else { "" };
-                format!("Nimbus — {}\n{}{:.0}°C / feels {:.0}°C",
-                    c.city_name, sign, temp, w.current.feels_like)
-            }
+        let Some(wd) = w.as_ref() else {
+            tray.set_tooltip("Nimbus — loading…");
+            return;
         };
+        let temp = match c.tray_temp {
+            TrayTemp::FeelsLike => wd.current.feels_like,
+            TrayTemp::Actual    => wd.current.temperature,
+        };
+        let sign = if temp >= 0.0 { "+" } else { "" };
+        // Temperature as tray title (shown next to icon on Windows)
+        let title = format!("{}{:.0}°", sign, temp);
+        let tooltip = format!("Nimbus — {}\n{}°C / feels {:.0}°C\n{}",
+            c.city_name, temp, wd.current.feels_like,
+            crate::weather::wmo_description(wd.current.weather_code));
+        tray.set_title(&title);
         tray.set_tooltip(&tooltip);
+        tray.set_weather_icon(wd.current.weather_code);
     }
 
     fn open_forecast(&self) {
