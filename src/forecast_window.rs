@@ -1,6 +1,7 @@
 use eframe::egui;
+use chrono::Datelike;
 use crate::config::TempUnit;
-use crate::main::wmo_description_uk;
+use crate::wmo_description_uk;
 use crate::weather::{WeatherData, wmo_icon, wind_direction_label};
 
 #[derive(Clone, Default)]
