@@ -106,9 +106,9 @@ impl SettingsWindow {
             let results = state.results.clone();
             drop(state);
 
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(ui.visuals().extreme_bg_color)
-                .rounding(4.0)
+                .corner_radius(4.0)
                 .inner_margin(4.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()

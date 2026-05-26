@@ -110,7 +110,7 @@ impl EguiWindow {
 
     fn paint<F>(&mut self, build_ui: F)
     where
-        F: FnOnce(&egui::Context),
+        F: FnMut(&egui::Context),
     {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let full_output = self.egui_ctx.run(raw_input, build_ui);
