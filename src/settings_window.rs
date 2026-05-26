@@ -1,6 +1,7 @@
+use eframe::egui;
 use crate::config::{Config, RefreshInterval, TrayTemp};
 use crate::geo::{search_cities, GeoResult};
-use egui::{self, Color32, CentralPanel, RichText, Ui};
+use crate::AppEvent;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,218 +12,148 @@ struct SearchState {
     error: Option<String>,
 }
 
-pub struct SettingsWindow {
-    tray_temp: TrayTemp,
-    refresh_interval: RefreshInterval,
-
-    city_query: String,
-    last_keystroke: Option<Instant>,
-    search_state: Arc<Mutex<SearchState>>,
-    selected_city: Option<GeoResult>,
-
-    /// Set when the user clicks Save; caller must consume this
-    pub pending_config: Option<Config>,
+pub struct SettingsApp {
+    config: Config,
+    query: String,
+    last_key: Option<Instant>,
+    search: Arc<Mutex<SearchState>>,
+    selected: Option<GeoResult>,
+    proxy: winit::event_loop::EventLoopProxy<AppEvent>,
+    rt: tokio::runtime::Handle,
+    status: String,
 }
 
-impl SettingsWindow {
-    pub fn new(config: &Config) -> Self {
+impl SettingsApp {
+    pub fn new(
+        config: Config,
+        rt: tokio::runtime::Handle,
+        proxy: winit::event_loop::EventLoopProxy<AppEvent>,
+    ) -> Self {
         Self {
-            tray_temp: config.tray_temp,
-            refresh_interval: config.refresh_interval,
-            city_query: config.city_name.clone(),
-            last_keystroke: None,
-            search_state: Arc::new(Mutex::new(SearchState::default())),
-            selected_city: None,
-            pending_config: None,
+            query: config.city_name.clone(),
+            config,
+            last_key: None,
+            search: Arc::new(Mutex::new(SearchState::default())),
+            selected: None,
+            proxy,
+            rt,
+            status: String::new(),
         }
     }
+}
 
-    pub fn sync_from_config(&mut self, config: &Config) {
-        self.tray_temp = config.tray_temp;
-        self.refresh_interval = config.refresh_interval;
-        self.city_query = config.city_name.clone();
-        self.selected_city = None;
-        if let Ok(mut s) = self.search_state.lock() {
-            s.results.clear();
-            s.error = None;
-        }
-    }
-
-    pub fn show(&mut self, ctx: &egui::Context, rt: &tokio::runtime::Handle) {
-        // Fire debounced search
-        if let Some(t) = self.last_keystroke {
+impl eframe::App for SettingsApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Debounce search
+        if let Some(t) = self.last_key {
             if t.elapsed() >= Duration::from_millis(300) {
-                self.last_keystroke = None;
-                self.trigger_search(rt, ctx);
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(300));
-            }
-        }
-
-        CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
-            self.draw_city(ui, rt, ctx);
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(8.0);
-            self.draw_display(ui);
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(8.0);
-            self.draw_refresh(ui);
-            ui.add_space(16.0);
-            self.draw_buttons(ui);
-        });
-    }
-
-    fn draw_city(&mut self, ui: &mut Ui, rt: &tokio::runtime::Handle, ctx: &egui::Context) {
-        ui.label(RichText::new("City").strong());
-        ui.add_space(4.0);
-
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut self.city_query)
-                .hint_text("Search city…")
-                .desired_width(320.0),
-        );
-
-        if resp.changed() {
-            self.last_keystroke = Some(Instant::now());
-            self.selected_city = None;
-            if let Ok(mut s) = self.search_state.lock() {
-                s.results.clear();
-                s.error = None;
-            }
-        }
-
-        let state = self.search_state.lock().unwrap();
-        if state.loading {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new("Searching…").color(Color32::GRAY).size(12.0));
-            });
-        } else if let Some(err) = &state.error {
-            ui.label(RichText::new(err.as_str()).color(Color32::RED).size(12.0));
-        } else if !state.results.is_empty() {
-            let results = state.results.clone();
-            drop(state);
-
-            egui::Frame::new()
-                .fill(ui.visuals().extreme_bg_color)
-                .corner_radius(4.0)
-                .inner_margin(4.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            for city in &results {
-                                let label = city.display_label();
-                                let selected = self
-                                    .selected_city
-                                    .as_ref()
-                                    .map(|c| {
-                                        c.name == city.name && c.latitude == city.latitude
-                                    })
-                                    .unwrap_or(false);
-
-                                if ui.selectable_label(selected, &label).clicked() {
-                                    self.selected_city = Some(city.clone());
-                                    self.city_query = city.name.clone();
-                                    if let Ok(mut s) = self.search_state.lock() {
-                                        s.results.clear();
-                                    }
-                                }
-                            }
-                        });
-                });
-        }
-    }
-
-    fn draw_display(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Show in tray").strong());
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.tray_temp, TrayTemp::Actual, "Actual temperature");
-            ui.radio_value(&mut self.tray_temp, TrayTemp::FeelsLike, "Feels like");
-        });
-    }
-
-    fn draw_refresh(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Refresh interval").strong());
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            for &interval in RefreshInterval::all() {
-                ui.radio_value(&mut self.refresh_interval, interval, interval.label());
-            }
-        });
-    }
-
-    fn draw_buttons(&mut self, ui: &mut Ui) {
-        let can_save = self.selected_city.is_some();
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
-                .clicked()
-            {
-                if let Some(city) = &self.selected_city {
-                    self.pending_config = Some(Config {
-                        city_name: city.name.clone(),
-                        latitude: city.latitude,
-                        longitude: city.longitude,
-                        tray_temp: self.tray_temp,
-                        refresh_interval: self.refresh_interval,
+                self.last_key = None;
+                let q = self.query.trim().to_string();
+                if !q.is_empty() {
+                    let state = Arc::clone(&self.search);
+                    let ctx2 = ctx.clone();
+                    { let mut s = state.lock().unwrap(); s.loading = true; s.results.clear(); s.error = None; }
+                    self.rt.spawn(async move {
+                        match search_cities(&q, 8).await {
+                            Ok(r) => { let mut s = state.lock().unwrap(); s.results = r; s.loading = false; }
+                            Err(e) => { let mut s = state.lock().unwrap(); s.error = Some(e.to_string()); s.loading = false; }
+                        }
+                        ctx2.request_repaint();
                     });
                 }
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
-            if ui.button("Cancel").clicked() {
-                // Caller hides the window; we just clear state
-                self.selected_city = None;
-                if let Ok(mut s) = self.search_state.lock() {
-                    s.results.clear();
-                }
-            }
-        });
+        }
 
-        if !can_save && !self.city_query.is_empty() {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("City").strong());
             ui.add_space(4.0);
-            ui.label(
-                RichText::new("Select a city from the search results")
-                    .color(Color32::GRAY)
-                    .size(11.0),
-            );
-        }
-    }
 
-    fn trigger_search(&mut self, rt: &tokio::runtime::Handle, ctx: &egui::Context) {
-        let query = self.city_query.trim().to_string();
-        if query.is_empty() {
-            return;
-        }
-
-        {
-            let mut s = self.search_state.lock().unwrap();
-            s.loading = true;
-            s.results.clear();
-            s.error = None;
-        }
-
-        let state = Arc::clone(&self.search_state);
-        let ctx = ctx.clone();
-
-        rt.spawn(async move {
-            match search_cities(&query, 8).await {
-                Ok(results) => {
-                    let mut s = state.lock().unwrap();
-                    s.results = results;
-                    s.loading = false;
-                }
-                Err(e) => {
-                    let mut s = state.lock().unwrap();
-                    s.error = Some(format!("Search failed: {e}"));
-                    s.loading = false;
-                }
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.query)
+                .hint_text("Search city…").desired_width(300.0));
+            if resp.changed() {
+                self.last_key = Some(Instant::now());
+                self.selected = None;
+                self.search.lock().unwrap().results.clear();
             }
-            ctx.request_repaint();
+
+            let state = self.search.lock().unwrap();
+            if state.loading {
+                ui.spinner();
+            } else if let Some(err) = &state.error {
+                ui.colored_label(egui::Color32::RED, err.as_str());
+            } else if !state.results.is_empty() {
+                let results = state.results.clone();
+                drop(state);
+                egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                    for city in &results {
+                        let label = city.display_label();
+                        let sel = self.selected.as_ref()
+                            .map(|c| c.latitude == city.latitude && c.longitude == city.longitude)
+                            .unwrap_or(false);
+                        if ui.selectable_label(sel, &label).clicked() {
+                            self.query = city.name.clone();
+                            self.selected = Some(city.clone());
+                            self.search.lock().unwrap().results.clear();
+                        }
+                    }
+                });
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Show in tray").strong());
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.config.tray_temp, TrayTemp::Actual, "Actual");
+                ui.radio_value(&mut self.config.tray_temp, TrayTemp::FeelsLike, "Feels like");
+            });
+
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Refresh interval").strong());
+            ui.horizontal(|ui| {
+                for &iv in RefreshInterval::all() {
+                    ui.radio_value(&mut self.config.refresh_interval, iv, iv.label());
+                }
+            });
+
+            ui.add_space(12.0);
+            ui.separator();
+
+            if !self.status.is_empty() {
+                ui.colored_label(egui::Color32::from_rgb(80, 180, 80), &self.status);
+                ui.add_space(4.0);
+            }
+
+            let can_save = self.selected.is_some();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+                    if let Some(city) = &self.selected {
+                        let new_cfg = Config {
+                            city_name: city.name.clone(),
+                            latitude: city.latitude,
+                            longitude: city.longitude,
+                            tray_temp: self.config.tray_temp,
+                            refresh_interval: self.config.refresh_interval,
+                        };
+                        if let Err(e) = new_cfg.save() {
+                            self.status = format!("Save failed: {e}");
+                        } else {
+                            let _ = self.proxy.send_event(AppEvent::ConfigSaved(new_cfg));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            if !can_save && !self.query.is_empty() {
+                ui.label(egui::RichText::new("Select a city from results").color(egui::Color32::GRAY).size(11.0));
+            }
         });
     }
 }
