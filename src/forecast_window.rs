@@ -1,23 +1,32 @@
 use eframe::egui;
 use crate::weather::{WeatherData, wmo_description, wmo_icon, wind_direction_label};
 
-pub struct ForecastApp {
-    pub data: WeatherData,
+#[derive(Clone, Default)]
+pub struct ForecastUi {
+    pub weather: Option<WeatherData>,
     pub city_name: String,
 }
 
-impl eframe::App for ForecastApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl ForecastUi {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn show(&self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Nimbus").size(18.0).strong());
-                ui.label(egui::RichText::new(format!("— {}", self.city_name))
-                    .size(18.0).color(egui::Color32::GRAY));
+                if !self.city_name.is_empty() {
+                    ui.label(egui::RichText::new(format!("— {}", self.city_name))
+                        .size(18.0).color(egui::Color32::GRAY));
+                }
             });
             ui.separator();
             ui.add_space(4.0);
 
-            let cur = &self.data.current;
+            let Some(data) = &self.weather else {
+                ui.spinner(); return;
+            };
+
+            let cur = &data.current;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(wmo_icon(cur.weather_code)).size(36.0));
                 ui.add_space(8.0);
@@ -43,11 +52,11 @@ impl eframe::App for ForecastApp {
                 egui::Grid::new("forecast")
                     .num_columns(8).striped(true).spacing([10.0, 4.0])
                     .show(ui, |ui| {
-                        for h in &["Day", "", "Condition", "Temp", "Feels", "Precip", "Wind", "Dir"] {
+                        for h in &["Day","","Condition","Temp","Feels","Precip","Wind","Dir"] {
                             ui.label(egui::RichText::new(*h).strong().size(11.0));
                         }
                         ui.end_row();
-                        for day in &self.data.forecast {
+                        for day in &data.forecast {
                             ui.label(egui::RichText::new(day.date.format("%a %m/%d").to_string()).size(12.0));
                             ui.label(egui::RichText::new(wmo_icon(day.weather_code)).size(14.0));
                             ui.label(egui::RichText::new(wmo_description(day.weather_code)).size(12.0));

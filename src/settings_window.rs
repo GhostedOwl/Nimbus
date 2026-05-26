@@ -12,38 +12,43 @@ struct SearchState {
     error: Option<String>,
 }
 
-pub struct SettingsApp {
-    config: Config,
+#[derive(Clone)]
+pub struct SettingsUi {
+    pub tray_temp: TrayTemp,
+    pub refresh_interval: RefreshInterval,
     query: String,
     last_key: Option<Instant>,
     search: Arc<Mutex<SearchState>>,
     selected: Option<GeoResult>,
-    proxy: winit::event_loop::EventLoopProxy<AppEvent>,
+    tx: std::sync::mpsc::Sender<AppEvent>,
     rt: tokio::runtime::Handle,
     status: String,
 }
 
-impl SettingsApp {
-    pub fn new(
-        config: Config,
-        rt: tokio::runtime::Handle,
-        proxy: winit::event_loop::EventLoopProxy<AppEvent>,
-    ) -> Self {
+impl SettingsUi {
+    pub fn new(config: &Config, rt: tokio::runtime::Handle, tx: std::sync::mpsc::Sender<AppEvent>) -> Self {
         Self {
+            tray_temp: config.tray_temp,
+            refresh_interval: config.refresh_interval,
             query: config.city_name.clone(),
-            config,
             last_key: None,
             search: Arc::new(Mutex::new(SearchState::default())),
             selected: None,
-            proxy,
+            tx,
             rt,
             status: String::new(),
         }
     }
-}
 
-impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    pub fn sync_from_config(&mut self, config: &Config) {
+        self.tray_temp = config.tray_temp;
+        self.refresh_interval = config.refresh_interval;
+        self.query = config.city_name.clone();
+        self.selected = None;
+        if let Ok(mut s) = self.search.lock() { s.results.clear(); s.error = None; }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) {
         // Debounce search
         if let Some(t) = self.last_key {
             if t.elapsed() >= Duration::from_millis(300) {
@@ -76,27 +81,29 @@ impl eframe::App for SettingsApp {
             if resp.changed() {
                 self.last_key = Some(Instant::now());
                 self.selected = None;
-                self.search.lock().unwrap().results.clear();
+                if let Ok(mut s) = self.search.lock() { s.results.clear(); }
             }
 
-            let state = self.search.lock().unwrap();
-            if state.loading {
-                ui.spinner();
-            } else if let Some(err) = &state.error {
-                ui.colored_label(egui::Color32::RED, err.as_str());
-            } else if !state.results.is_empty() {
-                let results = state.results.clone();
-                drop(state);
+            {
+                let state = self.search.lock().unwrap();
+                if state.loading {
+                    ui.spinner();
+                } else if let Some(err) = &state.error {
+                    ui.colored_label(egui::Color32::RED, err.as_str());
+                }
+            }
+
+            let results = self.search.lock().unwrap().results.clone();
+            if !results.is_empty() {
                 egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
                     for city in &results {
-                        let label = city.display_label();
                         let sel = self.selected.as_ref()
                             .map(|c| c.latitude == city.latitude && c.longitude == city.longitude)
                             .unwrap_or(false);
-                        if ui.selectable_label(sel, &label).clicked() {
+                        if ui.selectable_label(sel, &city.display_label()).clicked() {
                             self.query = city.name.clone();
                             self.selected = Some(city.clone());
-                            self.search.lock().unwrap().results.clear();
+                            if let Ok(mut s) = self.search.lock() { s.results.clear(); }
                         }
                     }
                 });
@@ -108,15 +115,15 @@ impl eframe::App for SettingsApp {
 
             ui.label(egui::RichText::new("Show in tray").strong());
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.config.tray_temp, TrayTemp::Actual, "Actual");
-                ui.radio_value(&mut self.config.tray_temp, TrayTemp::FeelsLike, "Feels like");
+                ui.radio_value(&mut self.tray_temp, TrayTemp::Actual, "Actual");
+                ui.radio_value(&mut self.tray_temp, TrayTemp::FeelsLike, "Feels like");
             });
 
             ui.add_space(8.0);
             ui.label(egui::RichText::new("Refresh interval").strong());
             ui.horizontal(|ui| {
                 for &iv in RefreshInterval::all() {
-                    ui.radio_value(&mut self.config.refresh_interval, iv, iv.label());
+                    ui.radio_value(&mut self.refresh_interval, iv, iv.label());
                 }
             });
 
@@ -136,14 +143,12 @@ impl eframe::App for SettingsApp {
                             city_name: city.name.clone(),
                             latitude: city.latitude,
                             longitude: city.longitude,
-                            tray_temp: self.config.tray_temp,
-                            refresh_interval: self.config.refresh_interval,
+                            tray_temp: self.tray_temp,
+                            refresh_interval: self.refresh_interval,
                         };
-                        if let Err(e) = new_cfg.save() {
-                            self.status = format!("Save failed: {e}");
-                        } else {
-                            let _ = self.proxy.send_event(AppEvent::ConfigSaved(new_cfg));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        match new_cfg.save() {
+                            Ok(_) => { let _ = self.tx.send(AppEvent::ConfigSaved(new_cfg)); }
+                            Err(e) => { self.status = format!("Save failed: {e}"); }
                         }
                     }
                 }
@@ -152,7 +157,8 @@ impl eframe::App for SettingsApp {
                 }
             });
             if !can_save && !self.query.is_empty() {
-                ui.label(egui::RichText::new("Select a city from results").color(egui::Color32::GRAY).size(11.0));
+                ui.label(egui::RichText::new("Select a city from results")
+                    .color(egui::Color32::GRAY).size(11.0));
             }
         });
     }
