@@ -246,6 +246,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("Nimbus", opts, Box::new(|_cc| Ok(Box::new(app))))?;
+    eframe::run_native("Nimbus", opts, Box::new(|_cc| Ok(Box::new(app))))
+        .map_err(|e| anyhow::anyhow!("{e}"));
     Ok(())
 }
