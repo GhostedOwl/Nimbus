@@ -49,9 +49,6 @@ impl Tray {
         self._icon.set_title(Some(text));
     }
 
-    pub fn poll_menu(&self) -> Option<MenuEvent> {
-        MenuEvent::receiver().try_recv().ok()
-    }
 }
 
 /// 1×1 прозорий піксель — вся інформація йде через set_title
