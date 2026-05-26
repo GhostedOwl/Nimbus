@@ -50,9 +50,7 @@ impl Tray {
     }
 
     pub fn set_title(&self, text: &str) {
-        if let Err(e) = self._icon.set_title(Some(text)) {
-            log::warn!("set_title failed: {e}");
-        }
+        self._icon.set_title(Some(text));
     }
 
     pub fn poll_menu(&self) -> Option<MenuEvent> {
