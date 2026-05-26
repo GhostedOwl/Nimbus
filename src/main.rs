@@ -17,7 +17,7 @@ use tray_icon::{TrayIconEvent, MouseButton};
 use weather::WeatherData;
 
 #[derive(Debug, Clone)]
-enum AppEvent {
+pub enum AppEvent {
     WeatherReady(Box<WeatherData>),
     WeatherError(String),
     ConfigSaved(Config),
@@ -34,15 +34,17 @@ struct NimbusApp {
     fetching: bool,
     show_forecast: bool,
     show_settings: bool,
-    forecast_ui: forecast_window::ForecastUi,
-    settings_ui: settings_window::SettingsUi,
+    forecast_ui: Arc<Mutex<forecast_window::ForecastUi>>,
+    settings_ui: Arc<Mutex<settings_window::SettingsUi>>,
 }
 
 impl NimbusApp {
     fn new(config: Config, rt: tokio::runtime::Handle) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        let forecast_ui = forecast_window::ForecastUi::new();
-        let settings_ui = settings_window::SettingsUi::new(&config, rt.clone(), tx.clone());
+        let forecast_ui = Arc::new(Mutex::new(forecast_window::ForecastUi::new()));
+        let settings_ui = Arc::new(Mutex::new(
+            settings_window::SettingsUi::new(&config, rt.clone(), tx.clone())
+        ));
         Self {
             config,
             weather: None,
@@ -78,52 +80,71 @@ impl NimbusApp {
 
     fn update_tray(&self) {
         let Some(tray) = &self.tray else { return };
-        let tooltip = match &self.weather {
-            None => "Nimbus — loading…".to_string(),
+        match &self.weather {
+            None => {
+                tray.set_tooltip("Nimbus — завантаження…");
+                tray.set_title("");
+            }
             Some(w) => {
                 let temp = match self.config.tray_temp {
                     TrayTemp::FeelsLike => w.current.feels_like,
                     TrayTemp::Actual    => w.current.temperature,
                 };
-                let sign = if temp >= 0.0 { "+" } else { "" };
-                format!("Nimbus — {}\n{}{:.0}°C / feels {:.0}°C\n{}",
-                    self.config.city_name, sign, temp, w.current.feels_like,
-                    weather::wmo_description(w.current.weather_code))
+                let (temp_str, unit) = match self.config.temp_unit {
+                    config::TempUnit::Celsius    => (temp, "°C"),
+                    config::TempUnit::Fahrenheit => (temp * 9.0 / 5.0 + 32.0, "°F"),
+                };
+                let sign = if temp_str >= 0.0 { "+" } else { "" };
+                let title = format!("{}{:.0}{}", sign, temp_str, unit);
+
+                let feels = match self.config.temp_unit {
+                    config::TempUnit::Celsius    => w.current.feels_like,
+                    config::TempUnit::Fahrenheit => w.current.feels_like * 9.0 / 5.0 + 32.0,
+                };
+                let tooltip = format!(
+                    "Nimbus — {}\n{} / відчувається {}{:.0}{}\n{}",
+                    self.config.city_name,
+                    title,
+                    if feels >= 0.0 { "+" } else { "" },
+                    feels,
+                    unit,
+                    wmo_description_uk(w.current.weather_code),
+                );
+                tray.set_title(&title);
+                tray.set_tooltip(&tooltip);
             }
-        };
-        tray.set_tooltip(&tooltip);
-        if let Some(w) = &self.weather {
-            tray.set_weather_icon(w.current.weather_code);
         }
     }
 }
 
 impl eframe::App for NimbusApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Init tray once
         if self.tray.is_none() {
             if let Ok(t) = Tray::build() {
                 self.tray = Some(t);
             }
         }
 
-        // Process async events
         while let Ok(ev) = self.event_rx.try_recv() {
             match ev {
                 AppEvent::WeatherReady(data) => {
                     self.fetching = false;
-                    self.forecast_ui.weather = Some(*data.clone());
-                    self.forecast_ui.city_name = self.config.city_name.clone();
+                    {
+                        let mut ui = self.forecast_ui.lock().unwrap();
+                        ui.weather = Some(*data.clone());
+                        ui.city_name = self.config.city_name.clone();
+                        ui.temp_unit = self.config.temp_unit;
+                    }
                     self.weather = Some(*data);
                     self.update_tray();
                 }
                 AppEvent::WeatherError(e) => {
                     self.fetching = false;
-                    log::error!("Weather fetch failed: {e}");
+                    log::error!("Помилка отримання погоди: {e}");
                 }
                 AppEvent::ConfigSaved(cfg) => {
                     self.config = cfg.clone();
-                    self.settings_ui.sync_from_config(&cfg);
+                    self.settings_ui.lock().unwrap().sync_from_config(&cfg);
                     self.show_settings = false;
                     self.fetching = false;
                     self.spawn_fetch(ctx);
@@ -131,7 +152,6 @@ impl eframe::App for NimbusApp {
             }
         }
 
-        // Poll tray events
         {
             let mut open_forecast = false;
             let mut open_settings = false;
@@ -139,7 +159,11 @@ impl eframe::App for NimbusApp {
             let mut do_quit = false;
 
             if let Some(tray) = &self.tray {
-                let (id_s, id_r, id_q) = (tray.id_settings.clone(), tray.id_refresh.clone(), tray.id_quit.clone());
+                let (id_s, id_r, id_q) = (
+                    tray.id_settings.clone(),
+                    tray.id_refresh.clone(),
+                    tray.id_quit.clone(),
+                );
                 while let Some(ev) = tray.poll_menu() {
                     if ev.id == id_s { open_settings = true; }
                     else if ev.id == id_r { do_refresh = true; }
@@ -154,65 +178,80 @@ impl eframe::App for NimbusApp {
 
             if open_forecast { self.show_forecast = true; }
             if open_settings { self.show_settings = true; }
-            if do_refresh { self.spawn_fetch(ctx); }
-            if do_quit { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+            if do_refresh    { self.spawn_fetch(ctx); }
+            if do_quit       { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
         }
 
-        // Auto-refresh
         let interval = Duration::from_secs(self.config.refresh_interval.minutes() * 60);
         if self.refresh_timer.elapsed() >= interval {
             self.spawn_fetch(ctx);
         }
 
-        // Keep main window hidden (we're a tray app)
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        // Forecast viewport
+        // Forecast
         if self.show_forecast {
-            let forecast_ui = Arc::new(Mutex::new(self.forecast_ui.clone()));
-            let close_flag = Arc::new(Mutex::new(false));
-            let close_flag2 = Arc::clone(&close_flag);
+            let ui = Arc::clone(&self.forecast_ui);
+            let closed = Arc::new(Mutex::new(false));
+            let closed2 = Arc::clone(&closed);
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("forecast"),
                 egui::ViewportBuilder::default()
                     .with_title("Nimbus")
-                    .with_inner_size([560.0, 320.0])
-                    .with_resizable(false),
+                    .with_inner_size([580.0, 340.0])
+                    .with_resizable(true),
                 move |ctx, _| {
-                    forecast_ui.lock().unwrap().show(ctx);
+                    ui.lock().unwrap().show(ctx);
                     if ctx.input(|i| i.viewport().close_requested()) {
-                        *close_flag2.lock().unwrap() = true;
+                        *closed2.lock().unwrap() = true;
                     }
                 },
             );
-            if *close_flag.lock().unwrap() {
-                self.show_forecast = false;
-            }
+            if *closed.lock().unwrap() { self.show_forecast = false; }
         }
 
-        // Settings viewport
+        // Settings
         if self.show_settings {
-            let settings_ui = Arc::new(Mutex::new(self.settings_ui.clone()));
-            let close_flag = Arc::new(Mutex::new(false));
-            let close_flag2 = Arc::clone(&close_flag);
+            let ui = Arc::clone(&self.settings_ui);
+            let closed = Arc::new(Mutex::new(false));
+            let closed2 = Arc::clone(&closed);
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings"),
                 egui::ViewportBuilder::default()
-                    .with_title("Nimbus — Settings")
-                    .with_inner_size([360.0, 300.0])
+                    .with_title("Nimbus — Налаштування")
+                    .with_inner_size([380.0, 340.0])
                     .with_resizable(false),
                 move |ctx, _| {
-                    settings_ui.lock().unwrap().show(ctx);
+                    ui.lock().unwrap().show(ctx);
                     if ctx.input(|i| i.viewport().close_requested()) {
-                        *close_flag2.lock().unwrap() = true;
+                        *closed2.lock().unwrap() = true;
                     }
                 },
             );
-            if *close_flag.lock().unwrap() {
-                self.show_settings = false;
-            }
+            if *closed.lock().unwrap() { self.show_settings = false; }
         }
+    }
+}
+
+/// WMO код → опис українською
+pub fn wmo_description_uk(code: u8) -> &'static str {
+    match code {
+        0       => "Ясно",
+        1       => "Переважно ясно",
+        2       => "Мінлива хмарність",
+        3       => "Хмарно",
+        45 | 48 => "Туман",
+        51 | 53 | 55 => "Мряка",
+        61 | 63 | 65 => "Дощ",
+        66 | 67 => "Крижаний дощ",
+        71 | 73 | 75 => "Сніг",
+        77      => "Снігові зерна",
+        80 | 81 | 82 => "Зливи",
+        85 | 86 => "Снігові зливи",
+        95      => "Гроза",
+        96 | 99 => "Гроза з градом",
+        _       => "—",
     }
 }
 
@@ -230,6 +269,7 @@ fn main() -> Result<()> {
                 longitude: loc.lon,
                 tray_temp: TrayTemp::default(),
                 refresh_interval: config::RefreshInterval::default(),
+                temp_unit: config::TempUnit::default(),
             };
             cfg.save()?;
             cfg
@@ -246,7 +286,6 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("Nimbus", opts, Box::new(|_cc| Ok(Box::new(app))))
-        .map_err(|e| anyhow::anyhow!("{e}"));
+    let _ = eframe::run_native("Nimbus", opts, Box::new(|_cc| Ok(Box::new(app))));
     Ok(())
 }
