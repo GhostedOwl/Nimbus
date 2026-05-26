@@ -90,11 +90,9 @@ impl NimbusApp {
         };
         let sign = if temp >= 0.0 { "+" } else { "" };
         // Temperature as tray title (shown next to icon on Windows)
-        let title = format!("{}{:.0}°", sign, temp);
         let tooltip = format!("Nimbus — {}\n{}°C / feels {:.0}°C\n{}",
             c.city_name, temp, wd.current.feels_like,
             crate::weather::wmo_description(wd.current.weather_code));
-        tray.set_title(&title);
         tray.set_tooltip(&tooltip);
         tray.set_weather_icon(wd.current.weather_code);
     }

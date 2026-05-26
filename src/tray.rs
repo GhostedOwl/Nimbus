@@ -49,10 +49,6 @@ impl Tray {
         }
     }
 
-    pub fn set_title(&self, text: &str) {
-        self._icon.set_title(Some(text));
-    }
-
     pub fn poll_menu(&self) -> Option<MenuEvent> {
         MenuEvent::receiver().try_recv().ok()
     }
