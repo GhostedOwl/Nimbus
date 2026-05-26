@@ -19,7 +19,7 @@ winit = "0.30"
 # egui rendering stack (no eframe — we own the event loop)
 egui = "0.31"
 egui-winit = "0.31"
-egui-wgpu = "0.31"
+egui-wgpu = { version = "0.31", features = ["winit"] }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json"] }
