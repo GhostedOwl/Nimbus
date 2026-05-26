@@ -2,8 +2,9 @@
 name = "nimbus"
 version = "0.1.2"
 edition = "2021"
-description = "Мінімальний погодний інформер у треї"
+description = "Минималистичный погодный информер в трее"
 license = "MIT"
+authors = ["GhostedOwl"]
 
 [[bin]]
 name = "nimbus"
@@ -30,3 +31,21 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[package.metadata.deb]
+section = "utils"
+priority = "optional"
+depends = "libgtk-3-0, libappindicator3-1 | libayatana-appindicator3-1, libxdo3"
+assets = [
+    ["target/release/nimbus", "usr/bin/nimbus", "755"],
+]
+maintainer-scripts = "debian/"
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/nimbus", dest = "/usr/bin/nimbus", mode = "755" },
+]
+
+[package.metadata.generate-rpm.requires]
+gtk3 = "*"
+libappindicator-gtk3 = "*"
